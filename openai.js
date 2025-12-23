@@ -3,6 +3,7 @@ const { v4: uuid } = require('uuid');
 const { config, logger, logClient, logOpenAI } = require('./config');
 const { sipMap, cleanupPromises } = require('./state');
 const { streamAudio, rtpEvents } = require('./rtp');
+const { tools, handleFunctionCall } = require('./supabase-functions');
 
 logger.info('Loading openai.js module');
 
@@ -180,6 +181,47 @@ async function startOpenAIWebSocket(channelId) {
             logOpenAI(`User command transcription for ${channelId}: ${response.transcript}`, 'info');
           }
           break;
+        case 'response.function_call_arguments.delta':
+          logOpenAI(`Function call arguments delta for ${channelId}: ${response.delta}`, 'info');
+          break;
+        case 'response.function_call_arguments.done':
+          logOpenAI(`Function call completed for ${channelId}: ${response.name}`, 'info');
+          if (response.call_id && response.name && response.arguments) {
+            try {
+              const args = JSON.parse(response.arguments);
+              logOpenAI(`Calling function ${response.name} with args: ${JSON.stringify(args)}`, 'info');
+              
+              const result = await handleFunctionCall(response.name, args);
+              logOpenAI(`Function ${response.name} result: ${JSON.stringify(result)}`, 'info');
+              
+              // Send function result back to OpenAI
+              ws.send(JSON.stringify({
+                type: 'conversation.item.create',
+                item: {
+                  type: 'function_call_output',
+                  call_id: response.call_id,
+                  output: JSON.stringify(result)
+                }
+              }));
+              
+              // Request new response with function result
+              ws.send(JSON.stringify({
+                type: 'response.create'
+              }));
+              
+            } catch (e) {
+              logger.error(`Error handling function call for ${channelId}: ${e.message}`);
+              ws.send(JSON.stringify({
+                type: 'conversation.item.create',
+                item: {
+                  type: 'function_call_output',
+                  call_id: response.call_id,
+                  output: JSON.stringify({ error: e.message })
+                }
+              }));
+            }
+          }
+          break;
         case 'response.audio.done':
           logOpenAI(`Response audio done for ${channelId}, total delta bytes: ${totalDeltaBytes}, estimated duration: ${(totalDeltaBytes / 8000).toFixed(2)}s`, 'info');
           isResponseActive = false;
@@ -221,9 +263,11 @@ async function startOpenAIWebSocket(channelId) {
             instructions: config.SYSTEM_PROMPT,
             input_audio_format: 'g711_ulaw',
             output_audio_format: 'g711_ulaw',
+            tools: tools,
+            tool_choice: 'auto',
             input_audio_transcription: {
               model: 'whisper-1',
-              language: 'en'
+              language: 'it'
             },
             turn_detection: {
               type: 'server_vad',
@@ -233,7 +277,7 @@ async function startOpenAIWebSocket(channelId) {
             }
           }
         }));
-        logClient(`Session updated for ${channelId}`);
+        logClient(`Session updated for ${channelId} with ${tools.length} tools`);
 
         try {
           const rtpSource = channelData.rtpSource || { address: '127.0.0.1', port: 12000 };

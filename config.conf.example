@@ -1,0 +1,16 @@
+OPENAI_API_KEY=your_openai_api_key_here
+ARI_URL=http://127.0.0.1:8088
+ARI_USERNAME=asterisk
+ARI_PASSWORD=asterisk
+MAX_CONCURRENT_CALLS=10
+LOG_LEVEL=info
+SYSTEM_PROMPT="Sei Sofia, un'assistente AI amichevole. Rispondi SEMPRE in italiano. Quando ricevi un saluto, rispondi con il tuo nome e chiedi come puoi aiutare. Mantieni le risposte brevi, sotto le 40 parole, in modo chiaro e cordiale. Usa un tono caldo e professionale."
+INITIAL_MESSAGE=Ciao
+REALTIME_MODEL=gpt-4o-mini-realtime-preview-2024-12-17
+SILENCE_PADDING_MS=100
+VAD_THRESHOLD=0.6
+VAD_PREFIX_PADDING_MS=200
+VAD_SILENCE_DURATION_MS=600
+CALL_DURATION_LIMIT_SECONDS=300
+SUPABASE_URL=your_supabase_url_here
+SUPABASE_ANON_KEY=your_supabase_anon_key_here
