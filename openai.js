@@ -3,7 +3,7 @@ const { v4: uuid } = require('uuid');
 const { config, logger, logClient, logOpenAI } = require('./config');
 const { sipMap, cleanupPromises } = require('./state');
 const { streamAudio, rtpEvents } = require('./rtp');
-const { tools, handleFunctionCall } = require('./supabase-functions');
+const { tools, handleFunctionCall, getAIConfig } = require('./supabase-functions');
 
 logger.info('Loading openai.js module');
 
@@ -86,6 +86,14 @@ async function startOpenAIWebSocket(channelId) {
   let retryCount = 0;
   const maxRetries = 3;
   let isResponseActive = false;
+
+  // Carica la configurazione dell'assistente da Supabase
+  const aiConfig = await getAIConfig();
+  const systemPrompt = aiConfig?.system_prompt || config.SYSTEM_PROMPT;
+  const welcomeMessage = aiConfig?.welcome_message || config.INITIAL_MESSAGE || 'Ciao';
+  const assistantVoice = aiConfig?.voice || config.OPENAI_VOICE || 'alloy';
+
+  logger.info(`Configurazione assistente caricata: ${aiConfig ? 'Da Database' : 'Default config.conf'}`);
   let totalDeltaBytes = 0;
   let loggedDeltaBytes = 0;
   let segmentCount = 0;
@@ -190,10 +198,10 @@ async function startOpenAIWebSocket(channelId) {
             try {
               const args = JSON.parse(response.arguments);
               logOpenAI(`Calling function ${response.name} with args: ${JSON.stringify(args)}`, 'info');
-              
+
               const result = await handleFunctionCall(response.name, args);
               logOpenAI(`Function ${response.name} result: ${JSON.stringify(result)}`, 'info');
-              
+
               // Send function result back to OpenAI
               ws.send(JSON.stringify({
                 type: 'conversation.item.create',
@@ -203,12 +211,12 @@ async function startOpenAIWebSocket(channelId) {
                   output: JSON.stringify(result)
                 }
               }));
-              
+
               // Request new response with function result
               ws.send(JSON.stringify({
                 type: 'response.create'
               }));
-              
+
             } catch (e) {
               logger.error(`Error handling function call for ${channelId}: ${e.message}`);
               ws.send(JSON.stringify({
@@ -259,8 +267,8 @@ async function startOpenAIWebSocket(channelId) {
           type: 'session.update',
           session: {
             modalities: ['audio', 'text'],
-            voice: config.OPENAI_VOICE || 'alloy',
-            instructions: config.SYSTEM_PROMPT,
+            voice: assistantVoice,
+            instructions: systemPrompt,
             input_audio_format: 'g711_ulaw',
             output_audio_format: 'g711_ulaw',
             tools: tools,
@@ -288,21 +296,21 @@ async function startOpenAIWebSocket(channelId) {
           sipMap.set(channelId, channelData);
 
           const itemId = uuid().replace(/-/g, '').substring(0, 32);
-          logClient(`Sending initial message for ${channelId}: ${config.INITIAL_MESSAGE || 'Hi'}`);
+          logClient(`Sending initial message for ${channelId}: ${welcomeMessage}`);
           ws.send(JSON.stringify({
             type: 'conversation.item.create',
             item: {
               id: itemId,
               type: 'message',
               role: 'user',
-              content: [{ type: 'input_text', text: config.INITIAL_MESSAGE || 'Hi' }]
+              content: [{ type: 'input_text', text: welcomeMessage }]
             }
           }));
           ws.send(JSON.stringify({
             type: 'response.create',
             response: {
               modalities: ['audio', 'text'],
-              instructions: config.SYSTEM_PROMPT,
+              instructions: systemPrompt,
               output_audio_format: 'g711_ulaw'
             }
           }));

@@ -1,197 +1,162 @@
-const { config, logger } = require('./config');
+const { config: appConfig, logger } = require('./config');
 
 // Usa fetch nativo di Node.js 18+
 const fetch = globalThis.fetch;
 
-// Definizione dei tools disponibili per OpenAI
+/**
+ * Carica la configurazione dell'assistente dalla tabella ai_voice_config
+ */
+async function getAIConfig() {
+  const supabaseUrl = appConfig.SUPABASE_URL;
+  const supabaseKey = appConfig.SUPABASE_ANON_KEY;
+
+  try {
+    const response = await fetch(`${supabaseUrl}/rest/v1/ai_voice_config?select=*&limit=1`, {
+      headers: {
+        'apikey': supabaseKey,
+        'Authorization': `Bearer ${supabaseKey}`
+      }
+    });
+
+    if (!response.ok) throw new Error(`Status: ${response.status}`);
+    
+    const data = await response.json();
+    if (data && data.length > 0) {
+      return {
+        system_prompt: data[0].system_prompt,
+        welcome_message: data[0].welcome_message,
+        voice: data[0].voice || 'alloy',
+        name: data[0].assistant_name || 'Elisa'
+      };
+    }
+  } catch (error) {
+    logger.error(`Errore nel caricamento della configurazione AI: ${error.message}`);
+  }
+  return null;
+}
+
+/**
+ * Definizione dei tools disponibili per OpenAI Realtime
+ */
 const tools = [
   {
     type: 'function',
-    name: 'get_user_info',
-    description: 'Ottiene informazioni su un cliente dal database',
+    name: 'find_available_slots',
+    description: 'Cerca gli slot disponibili per un appuntamento nel calendario.',
     parameters: {
       type: 'object',
       properties: {
-        phone: {
-          type: 'string',
-          description: 'Numero di telefono del cliente'
-        },
-        name: {
-          type: 'string',
-          description: 'Nome del cliente'
-        }
-      }
+        date: { type: 'string', description: 'Data richiesta in formato YYYY-MM-DD' },
+        service_id: { type: 'string', description: 'ID del servizio richiesto (opzionale)' }
+      },
+      required: ['date']
     }
   },
   {
     type: 'function',
-    name: 'get_appointments',
-    description: 'Verifica gli appuntamenti disponibili',
+    name: 'book_appointment',
+    description: 'Registra un appuntamento per il cliente.',
     parameters: {
       type: 'object',
       properties: {
-        date: {
-          type: 'string',
-          description: 'Data richiesta in formato YYYY-MM-DD'
-        }
-      }
+        slot_id: { type: 'string', description: 'L\'ID dello slot selezionato' },
+        customer_name: { type: 'string', description: 'Nome del cliente' },
+        customer_phone: { type: 'string', description: 'Telefono del cliente' },
+        service_id: { type: 'string', description: 'ID del servizio scelto' }
+      },
+      required: ['slot_id', 'customer_name', 'customer_phone']
     }
   },
   {
     type: 'function',
-    name: 'get_practice_status',
-    description: 'Controlla lo stato di una pratica',
+    name: 'search_knowledge',
+    description: 'Cerca informazioni su bonus, documenti, normative fiscali e orari dell\'ufficio.',
     parameters: {
       type: 'object',
       properties: {
-        practice_id: {
-          type: 'string',
-          description: 'ID della pratica'
-        }
-      }
+        query: { type: 'string', description: 'La domanda o l\'argomento da cercare' }
+      },
+      required: ['query']
+    }
+  },
+  {
+    type: 'function',
+    name: 'send_whatsapp',
+    description: 'Invia un messaggio WhatsApp di conferma o riepilogo documenti.',
+    parameters: {
+      type: 'object',
+      properties: {
+        phone: { type: 'string', description: 'Numero di telefono con prefisso internazionale (es. +39...)' },
+        message: { type: 'string', description: 'Contenuto del messaggio' }
+      },
+      required: ['phone', 'message']
     }
   }
 ];
 
-// Funzione per chiamare Supabase
-async function callSupabaseFunction(functionName, params) {
-  const supabaseUrl = config.SUPABASE_URL;
-  const supabaseKey = config.SUPABASE_ANON_KEY;
+/**
+ * Helper per chiamare le Edge Functions di Supabase
+ */
+async function callEdgeFunction(functionName, payload) {
+  const supabaseUrl = appConfig.SUPABASE_URL;
+  const supabaseKey = appConfig.SUPABASE_ANON_KEY;
 
-  if (!supabaseUrl || !supabaseKey) {
-    logger.error('Supabase credentials not configured');
-    return { error: 'Sistema non configurato' };
-  }
+  logger.info(`Chiamata Edge Function: ${functionName}`);
 
   try {
-    // Esempio di chiamata REST API
-    const response = await fetch(`${supabaseUrl}/rest/v1/rpc/${functionName}`, {
+    const response = await fetch(`${supabaseUrl}/functions/v1/${functionName}`, {
       method: 'POST',
       headers: {
         'apikey': supabaseKey,
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${supabaseKey}`
       },
-      body: JSON.stringify(params)
+      body: JSON.stringify(payload)
     });
 
     if (!response.ok) {
-      throw new Error(`Supabase error: ${response.statusText}`);
+      const errorText = await response.text();
+      logger.error(`Edge Function ${functionName} ha restituito errore: ${errorText}`);
+      return { error: `Errore nella funzione ${functionName}`, status: response.status };
     }
 
     return await response.json();
   } catch (error) {
-    logger.error(`Error calling Supabase function ${functionName}: ${error.message}`);
+    logger.error(`Eccezione durante la chiamata alla Edge Function ${functionName}: ${error.message}`);
     return { error: error.message };
   }
 }
 
-// Handler per le funzioni
+/**
+ * Handler per il routing delle chiamate ai tools
+ */
 async function handleFunctionCall(functionName, args) {
-  logger.info(`Handling function call: ${functionName} with args: ${JSON.stringify(args)}`);
+  logger.info(`Handling tool call: ${functionName} con argomenti: ${JSON.stringify(args)}`);
 
   switch (functionName) {
-    case 'get_user_info':
-      return await getUserInfo(args);
-    case 'get_appointments':
-      return await getAppointments(args);
-    case 'get_practice_status':
-      return await getPracticeStatus(args);
+    case 'find_available_slots':
+      return await callEdgeFunction('find-available-slots', args);
+    
+    case 'book_appointment':
+      return await callEdgeFunction('public-booking-handler', args);
+    
+    case 'search_knowledge':
+      return await callEdgeFunction('ai-knowledge-tools', args);
+    
+    case 'send_whatsapp':
+      return await callEdgeFunction('send-whatsapp', args);
+    
+    case 'cleanup_conversation':
+      return await callEdgeFunction('voice-conversation-cleanup', args);
+
     default:
-      return { error: 'Funzione non trovata' };
-  }
-}
-
-// Implementazioni specifiche
-async function getUserInfo(args) {
-  // Query al database Supabase
-  const supabaseUrl = config.SUPABASE_URL;
-  const supabaseKey = config.SUPABASE_ANON_KEY;
-
-  try {
-    const response = await fetch(`${supabaseUrl}/rest/v1/clienti?or=(telefono.eq.${args.phone},nome.ilike.*${args.name}*)&select=*&limit=1`, {
-      headers: {
-        'apikey': supabaseKey,
-        'Authorization': `Bearer ${supabaseKey}`
-      }
-    });
-
-    const data = await response.json();
-    if (data && data.length > 0) {
-      return {
-        success: true,
-        cliente: {
-          nome: data[0].nome,
-          cognome: data[0].cognome,
-          telefono: data[0].telefono,
-          email: data[0].email
-        }
-      };
-    }
-    return { success: false, message: 'Cliente non trovato' };
-  } catch (error) {
-    logger.error(`Error in getUserInfo: ${error.message}`);
-    return { error: error.message };
-  }
-}
-
-async function getAppointments(args) {
-  const supabaseUrl = config.SUPABASE_URL;
-  const supabaseKey = config.SUPABASE_ANON_KEY;
-
-  try {
-    const response = await fetch(`${supabaseUrl}/rest/v1/bookings?date.eq.${args.date}&status.eq.available&select=*`, {
-      headers: {
-        'apikey': supabaseKey,
-        'Authorization': `Bearer ${supabaseKey}`
-      }
-    });
-
-    const data = await response.json();
-    return {
-      success: true,
-      appuntamenti: data.map(a => ({
-        ora: a.time,
-        disponibile: true
-      }))
-    };
-  } catch (error) {
-    logger.error(`Error in getAppointments: ${error.message}`);
-    return { error: error.message };
-  }
-}
-
-async function getPracticeStatus(args) {
-  const supabaseUrl = config.SUPABASE_URL;
-  const supabaseKey = config.SUPABASE_ANON_KEY;
-
-  try {
-    const response = await fetch(`${supabaseUrl}/rest/v1/practices?id.eq.${args.practice_id}&select=*&limit=1`, {
-      headers: {
-        'apikey': supabaseKey,
-        'Authorization': `Bearer ${supabaseKey}`
-      }
-    });
-
-    const data = await response.json();
-    if (data && data.length > 0) {
-      return {
-        success: true,
-        pratica: {
-          id: data[0].id,
-          stato: data[0].status,
-          descrizione: data[0].description
-        }
-      };
-    }
-    return { success: false, message: 'Pratica non trovata' };
-  } catch (error) {
-    logger.error(`Error in getPracticeStatus: ${error.message}`);
-    return { error: error.message };
+      return { error: `Tool ${functionName} non riconosciuto` };
   }
 }
 
 module.exports = {
   tools,
-  handleFunctionCall
+  handleFunctionCall,
+  getAIConfig
 };
+

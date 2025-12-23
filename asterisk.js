@@ -4,6 +4,7 @@ const { config, logger } = require('./config');
 const { sipMap, extMap, rtpSenders, rtpReceivers, cleanupPromises } = require('./state');
 const { startRTPReceiver, getNextRtpPort, releaseRtpPort } = require('./rtp');
 const { startOpenAIWebSocket } = require('./openai');
+const { handleFunctionCall } = require('./supabase-functions');
 
 let ariClient;
 
@@ -122,6 +123,15 @@ async function cleanupChannel(channelId) {
         }
         rtpReceivers.delete(channelId);
       }
+
+      // Trigger voice-conversation-cleanup Edge Function
+      try {
+        await handleFunctionCall('cleanup_conversation', { channelId });
+        logger.info(`Supabase cleanup function triggered for ${channelId}`);
+      } catch (e) {
+        logger.error(`Error triggering Supabase cleanup for ${channelId}: ${e.message}`);
+      }
+
     } catch (e) {
       logger.error(`Cleanup error for ${channelId}: ${e.message}`);
     } finally {
